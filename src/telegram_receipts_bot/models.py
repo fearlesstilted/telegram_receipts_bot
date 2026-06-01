@@ -31,6 +31,8 @@ class ReceiptDraft:
     uwagi: str = ""
     items: list[ReceiptItem] = field(default_factory=list)
     ocr_text: str = ""
+    ocr_confidence: float = 0.0
+    ocr_variant: str = ""
     receipt_url: str = ""
 
     def to_preview_text(self, budget_remaining: float | None = None) -> str:
@@ -70,6 +72,11 @@ class ReceiptDraft:
             else ""
         )
         amount = f"{self.kwota:.2f} PLN" if self.kwota is not None else ""
+        ocr_line = ""
+        if self.ocr_confidence or self.ocr_variant:
+            ocr_line = (
+                f"\nOCR: pewność {self.ocr_confidence:.0%}, wariant {self.ocr_variant or '-'}"
+            )
         return (
             "Szczegóły OCR:\n\n"
             f"Wyjazd: {self.wyjazd_nazwa or '-'}\n"
@@ -85,6 +92,7 @@ class ReceiptDraft:
             f"Towar: {self.towar or '-'}\n"
             f"Uwagi: {self.uwagi or '-'}\n"
             f"Pozycje:\n{items_block}"
+            f"{ocr_line}"
             f"{budget_line}\n\n"
             "Po kliknięciu Edytuj wyślij linie `pole: wartość`."
         )

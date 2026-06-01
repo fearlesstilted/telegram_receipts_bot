@@ -18,6 +18,7 @@ class Settings:
     max_auto_save_amount: float
     tesseract_cmd: str
     timezone_name: str
+    ocr_confidence_warn: float = 0.75
 
 
 def load_settings() -> Settings:
@@ -38,4 +39,5 @@ def load_settings() -> Settings:
         max_auto_save_amount=float(os.getenv("MAX_AUTO_SAVE_AMOUNT", "10000")),
         tesseract_cmd=os.getenv("TESSERACT_CMD", "tesseract").strip(),
         timezone_name=os.getenv("TZ", "Europe/Warsaw").strip(),
+        ocr_confidence_warn=float(os.getenv("OCR_CONFIDENCE_WARN", "0.75")),
     )

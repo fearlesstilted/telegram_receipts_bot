@@ -2,9 +2,26 @@
 import json
 from pathlib import Path
 
-from telegram_receipts_bot.bot import _needs_manual_check, _parse_callback_data, _select_photo
+from telegram_receipts_bot.bot import (
+    _manual_check_message,
+    _needs_manual_check,
+    _parse_callback_data,
+    _select_photo,
+)
 from telegram_receipts_bot.exporter import generate_export
 from telegram_receipts_bot.models import ReceiptDraft
+
+
+def _complete_draft(confidence: float = 0.95) -> ReceiptDraft:
+    """A draft with every critical field filled and a given OCR confidence."""
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/r.jpg")
+    draft.kwota = 127.00
+    draft.data_dokumentu = "2026-04-09"
+    draft.nip = "7471727805"
+    draft.sprzedawca = "Sklep ABC"
+    draft.ocr_confidence = confidence
+    draft.ocr_variant = "gray"
+    return draft
 
 
 class TestCallbackParsing:
@@ -77,22 +94,90 @@ class TestPhotoSelection:
 
 
 class TestManualCheck:
-    def test_normal_amount_does_not_need_manual_check(self) -> None:
-        draft = ReceiptDraft.empty("abc", 1, "/tmp/r.jpg")
-        draft.kwota = 127.00
+    def test_complete_high_confidence_does_not_need_manual_check(self) -> None:
+        draft = _complete_draft(confidence=0.95)
 
-        assert not _needs_manual_check(draft, max_auto_save_amount=10_000)
+        assert not _needs_manual_check(
+            draft, max_auto_save_amount=10_000, confidence_warn=0.75
+        )
 
     def test_missing_amount_needs_manual_check(self) -> None:
         draft = ReceiptDraft.empty("abc", 1, "/tmp/r.jpg")
 
-        assert _needs_manual_check(draft, max_auto_save_amount=10_000)
+        assert _needs_manual_check(draft, max_auto_save_amount=10_000, confidence_warn=0.75)
 
     def test_huge_amount_needs_manual_check(self) -> None:
-        draft = ReceiptDraft.empty("abc", 1, "/tmp/r.jpg")
+        draft = _complete_draft()
         draft.kwota = 2_000_000
 
-        assert _needs_manual_check(draft, max_auto_save_amount=10_000)
+        assert _needs_manual_check(draft, max_auto_save_amount=10_000, confidence_warn=0.75)
+
+    def test_low_confidence_needs_manual_check(self) -> None:
+        # Every critical field is filled, but OCR confidence is below the threshold.
+        draft = _complete_draft(confidence=0.40)
+
+        assert _needs_manual_check(draft, max_auto_save_amount=10_000, confidence_warn=0.75)
+
+    def test_missing_date_needs_manual_check(self) -> None:
+        draft = _complete_draft()
+        draft.data_dokumentu = ""
+
+        assert _needs_manual_check(draft, max_auto_save_amount=10_000, confidence_warn=0.75)
+
+    def test_missing_nip_and_seller_needs_manual_check(self) -> None:
+        draft = _complete_draft()
+        draft.nip = ""
+        draft.sprzedawca = ""
+
+        assert _needs_manual_check(draft, max_auto_save_amount=10_000, confidence_warn=0.75)
+
+    def test_unknown_confidence_does_not_trigger_by_itself(self) -> None:
+        # confidence 0.0 means "unknown" (e.g. Tesseract / no scores) and must not warn alone.
+        draft = _complete_draft(confidence=0.0)
+
+        assert not _needs_manual_check(
+            draft, max_auto_save_amount=10_000, confidence_warn=0.75
+        )
+
+
+class TestManualCheckMessage:
+    def test_message_includes_low_confidence_reason(self) -> None:
+        draft = _complete_draft(confidence=0.40)
+
+        message = _manual_check_message(
+            draft, max_auto_save_amount=10_000, confidence_warn=0.75
+        )
+
+        assert "pewno" in message.lower()  # "niska pewność odczytu OCR (40%)"
+
+    def test_message_includes_missing_date_reason(self) -> None:
+        draft = _complete_draft()
+        draft.data_dokumentu = ""
+
+        message = _manual_check_message(
+            draft, max_auto_save_amount=10_000, confidence_warn=0.75
+        )
+
+        assert "daty" in message.lower()
+
+
+class TestDetailsText:
+    def test_details_include_confidence_and_variant_when_present(self) -> None:
+        draft = _complete_draft(confidence=0.83)
+        draft.ocr_variant = "gray"
+
+        details = draft.to_details_text()
+
+        assert "OCR" in details
+        assert "gray" in details
+        assert "83%" in details
+
+    def test_details_omit_ocr_line_when_absent(self) -> None:
+        draft = ReceiptDraft.empty("abc", 1, "/tmp/r.jpg")  # confidence 0.0, variant ""
+
+        details = draft.to_details_text()
+
+        assert "wariant" not in details
 
 
 class TestExporterBackwardCompat:

@@ -18,7 +18,7 @@ from telegram.ext import (
 from .config import Settings
 from .exporter import generate_register
 from .models import ReceiptDraft
-from .ocr import OcrError, extract_text
+from .ocr import OcrError, extract_ocr_result
 from .parser import apply_manual_edits, parse_receipt_text
 from .sinks import BaseSink
 from .state import StateStore, current_month_key
@@ -207,10 +207,14 @@ class ReceiptBot:
         self.state.save_draft(draft)
         month_key = current_month_key()
         remaining = self.state.preview_remaining(month_key, draft.kwota)
-        suspicious = _needs_manual_check(draft, self.settings.max_auto_save_amount)
+        suspicious = _needs_manual_check(
+            draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+        )
         text = draft.to_preview_text(remaining)
         if suspicious:
-            text += "\n\n" + _manual_check_message(draft, self.settings.max_auto_save_amount)
+            text += "\n\n" + _manual_check_message(
+                draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+            )
         await update.message.reply_text(
             text,
             reply_markup=_preview_keyboard(draft.draft_id, suspicious),
@@ -267,7 +271,9 @@ class ReceiptBot:
         if action == "details":
             month_key = current_month_key()
             remaining = self.state.preview_remaining(month_key, draft.kwota)
-            suspicious = _needs_manual_check(draft, self.settings.max_auto_save_amount)
+            suspicious = _needs_manual_check(
+                draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+            )
             await query.message.reply_text(
                 draft.to_details_text(remaining),
                 reply_markup=_preview_keyboard(draft.draft_id, suspicious),
@@ -281,10 +287,14 @@ class ReceiptBot:
             return
 
         if action in {"save", "force_save"}:
-            needs_check = _needs_manual_check(draft, self.settings.max_auto_save_amount)
+            needs_check = _needs_manual_check(
+                draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+            )
             if needs_check and action != "force_save":
                 await query.message.reply_text(
-                    _manual_check_message(draft, self.settings.max_auto_save_amount),
+                    _manual_check_message(
+                        draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+                    ),
                     reply_markup=_preview_keyboard(draft.draft_id, suspicious=True),
                 )
                 return
@@ -313,8 +323,10 @@ class ReceiptBot:
 
         draft = ReceiptDraft.empty(draft_id=draft_id, chat_id=chat_id, source_path=str(target))
         try:
-            raw_text = extract_text(target, self.settings)
-            draft = parse_receipt_text(raw_text, draft)
+            ocr_result = extract_ocr_result(target, self.settings)
+            draft = parse_receipt_text(ocr_result.text, draft)
+            draft.ocr_confidence = ocr_result.confidence
+            draft.ocr_variant = ocr_result.variant
         except OcrError as exc:
             logger.warning("OCR failed: %s", exc)
             draft.uwagi = f"OCR error: {exc}"
@@ -322,10 +334,14 @@ class ReceiptBot:
         self.state.save_draft(draft)
         month_key = current_month_key()
         remaining = self.state.preview_remaining(month_key, draft.kwota)
-        suspicious = _needs_manual_check(draft, self.settings.max_auto_save_amount)
+        suspicious = _needs_manual_check(
+            draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+        )
         text = draft.to_preview_text(remaining)
         if suspicious:
-            text += "\n\n" + _manual_check_message(draft, self.settings.max_auto_save_amount)
+            text += "\n\n" + _manual_check_message(
+                draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+            )
         await update.message.reply_text(
             text,
             reply_markup=_preview_keyboard(draft.draft_id, suspicious),
@@ -411,16 +427,53 @@ def _parse_callback_data(data: str) -> tuple[str, str, str | None]:
     return action, draft_id, payload
 
 
-def _needs_manual_check(draft: ReceiptDraft, max_auto_save_amount: float) -> bool:
-    return draft.kwota is None or draft.kwota <= 0 or draft.kwota > max_auto_save_amount
+def _missing_critical_fields(draft: ReceiptDraft) -> bool:
+    """Warn if a field we really need is empty: amount, date, or any seller identity."""
+    if not draft.kwota:
+        return True
+    if not draft.data_dokumentu:
+        return True
+    if not draft.nip and not draft.sprzedawca:
+        return True
+    return False
 
 
-def _manual_check_message(draft: ReceiptDraft, max_auto_save_amount: float) -> str:
+def _low_confidence(draft: ReceiptDraft, confidence_warn: float) -> bool:
+    """Low OCR confidence, but only when we actually have a confidence value (>0)."""
+    return bool(draft.ocr_confidence) and draft.ocr_confidence < confidence_warn
+
+
+def _needs_manual_check(
+    draft: ReceiptDraft, max_auto_save_amount: float, confidence_warn: float = 0.0
+) -> bool:
+    if draft.kwota is None or draft.kwota <= 0 or draft.kwota > max_auto_save_amount:
+        return True
+    if _missing_critical_fields(draft):
+        return True
+    if _low_confidence(draft, confidence_warn):
+        return True
+    return False
+
+
+def _manual_check_message(
+    draft: ReceiptDraft, max_auto_save_amount: float, confidence_warn: float = 0.0
+) -> str:
+    reasons: list[str] = []
     if draft.kwota is None:
-        return "Uwaga: nie udało się pewnie odczytać kwoty. Popraw kwotę przed zapisem."
-    if draft.kwota <= 0:
-        return "Uwaga: kwota wygląda nieprawidłowo. Popraw kwotę przed zapisem."
-    return (
-        f"Uwaga: kwota {draft.kwota:.2f} PLN wygląda bardzo wysoko. "
-        f"Limit bez ostrzeżenia: {max_auto_save_amount:.2f} PLN."
-    )
+        reasons.append("nie udało się pewnie odczytać kwoty")
+    elif draft.kwota <= 0:
+        reasons.append("kwota wygląda nieprawidłowo")
+    elif draft.kwota > max_auto_save_amount:
+        reasons.append(
+            f"kwota {draft.kwota:.2f} PLN wygląda bardzo wysoko "
+            f"(limit bez ostrzeżenia: {max_auto_save_amount:.2f} PLN)"
+        )
+    if not draft.data_dokumentu:
+        reasons.append("brak daty dokumentu")
+    if not draft.nip and not draft.sprzedawca:
+        reasons.append("brak NIP i sprzedawcy")
+    if _low_confidence(draft, confidence_warn):
+        reasons.append(f"niska pewność odczytu OCR ({draft.ocr_confidence:.0%})")
+    if not reasons:
+        reasons.append("sprawdź dane przed zapisem")
+    return "Uwaga: " + "; ".join(reasons) + ". Sprawdź dane przed zapisem albo kliknij Edytuj."
