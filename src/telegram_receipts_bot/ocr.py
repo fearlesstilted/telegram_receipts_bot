@@ -45,7 +45,7 @@ def _extract_text_with_paddle(image_path: Path, settings: Settings) -> str:
             "`.venv/bin/python3 -m pip install -r requirements.txt`."
         ) from exc
     except Exception as exc:
-        raise OcrError(f"PaddleOCR failed: {exc}") from exc
+        raise OcrError(_describe_paddle_failure(exc)) from exc
 
     lines = _extract_paddle_text_lines(result)
     text = "\n".join(lines).strip()
@@ -55,6 +55,24 @@ def _extract_text_with_paddle(image_path: Path, settings: Settings) -> str:
 
 
 _PADDLE_OCR = None
+
+
+def _describe_paddle_failure(exc: Exception) -> str:
+    """Turn a raw Paddle exception into an actionable message.
+
+    The known Windows/CPU failure surfaces as oneDNN/MKLDNN or PIR-related errors. When we
+    recognise that signature we point the user at DIAGNOZA.bat instead of leaking a raw
+    traceback they cannot act on.
+    """
+    text = str(exc).lower()
+    crash_markers = ("onednn", "mkldnn", "pir", "primitive", "oneapi")
+    if any(marker in text for marker in crash_markers):
+        return (
+            "PaddleOCR crashed (known Windows/CPU oneDNN/PIR issue). "
+            "Uruchom DIAGNOZA.bat, sprawdź wersje paddlepaddle/paddleocr i spróbuj ponownie. "
+            f"Szczegóły: {exc}"
+        )
+    return f"PaddleOCR failed: {exc}"
 
 
 def _configure_paddle_runtime() -> None:
