@@ -1,44 +1,76 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from .config import Settings
 
+logger = logging.getLogger(__name__)
+
 
 class OcrError(RuntimeError):
     pass
 
 
+@dataclass
+class OcrResult:
+    """Outcome of an OCR run.
+
+    text:       recognised text joined by newlines
+    confidence: mean per-line recognition confidence in [0, 1] (0.0 if unknown,
+                e.g. the Tesseract path which has no probability)
+    variant:    which preprocessing variant / engine produced this result
+    """
+
+    text: str
+    confidence: float
+    variant: str
+
+
 def extract_text(image_path: Path, settings: Settings) -> str:
+    """Backward-compatible entry point: return only the recognised text."""
+    return extract_ocr_result(image_path, settings).text
+
+
+def extract_ocr_result(image_path: Path, settings: Settings) -> OcrResult:
+    """Confidence-aware entry point: return text, confidence and chosen variant."""
     if settings.ocr_mode == "mock":
-        return ""
+        return OcrResult("", 0.0, "mock")
 
     if settings.ocr_mode == "paddle":
-        return _extract_text_with_paddle(image_path, settings)
+        return _extract_paddle_ocr_result(image_path, settings)
 
     if settings.ocr_mode == "auto":
         try:
-            return _extract_text_with_paddle(image_path, settings)
+            return _extract_paddle_ocr_result(image_path, settings)
         except OcrError:
-            return _extract_text_with_tesseract(image_path, settings)
+            text = _extract_text_with_tesseract(image_path, settings)
+            return OcrResult(text, 0.0, "tesseract")
 
     if settings.ocr_mode == "tesseract":
-        return _extract_text_with_tesseract(image_path, settings)
+        text = _extract_text_with_tesseract(image_path, settings)
+        return OcrResult(text, 0.0, "tesseract")
 
     raise OcrError(f"Unsupported OCR mode: {settings.ocr_mode}")
 
 
-def _extract_text_with_paddle(image_path: Path, settings: Settings) -> str:
+def _extract_paddle_ocr_result(image_path: Path, settings: Settings) -> OcrResult:
+    """Run PaddleOCR over several gentle image variants and keep the best result.
+
+    "Best" combines recognition confidence with how many key fields the parser can
+    recover from the text (see _select_best_paddle_result). No hard thresholding is
+    used: Paddle does better on near-natural images than on binarised ones.
+    """
     try:
         _configure_paddle_runtime()
         ocr = _get_paddle_ocr(settings)
-        result = _run_paddle_ocr(ocr, image_path)
     except ImportError as exc:
         raise OcrError(
             "PaddleOCR is not installed. Install local dependencies with "
@@ -47,11 +79,77 @@ def _extract_text_with_paddle(image_path: Path, settings: Settings) -> str:
     except Exception as exc:
         raise OcrError(_describe_paddle_failure(exc)) from exc
 
-    lines = _extract_paddle_text_lines(result)
-    text = "\n".join(lines).strip()
-    if not text:
+    candidates: list[OcrResult] = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for variant_name, variant_path in _prepare_paddle_variants(image_path, Path(temp_dir)):
+            try:
+                result = _run_paddle_ocr(ocr, variant_path)
+            except Exception as exc:  # an inference crash on one variant aborts the run
+                raise OcrError(_describe_paddle_failure(exc)) from exc
+            lines, scores = _extract_paddle_text_and_scores(result)
+            text = "\n".join(lines).strip()
+            if not text:
+                continue
+            confidence = round(sum(scores) / len(scores), 4) if scores else 0.0
+            candidates.append(OcrResult(text, confidence, variant_name))
+
+    if not candidates:
         raise OcrError("PaddleOCR returned empty text")
-    return text
+    return _select_best_paddle_result(candidates)
+
+
+def _prepare_paddle_variants(image_path: Path, temp_dir: Path) -> list[tuple[str, Path]]:
+    """Gentle preprocessing variants for the Paddle path (no binarisation).
+
+    Always includes the raw image. Adds grayscale+autocontrast+upscale and a mild
+    contrast/sharpen pass. If the image cannot be opened we fall back to raw only.
+    """
+    variants: list[tuple[str, Path]] = [("raw", image_path)]
+    try:
+        with Image.open(image_path) as image:
+            gray = _upscale_if_needed(ImageOps.grayscale(image))
+            gray = ImageOps.autocontrast(gray)
+            sharp = ImageEnhance.Sharpness(ImageEnhance.Contrast(gray).enhance(1.5)).enhance(1.6)
+            for name, prepared in (("gray", gray), ("sharp", sharp)):
+                target = temp_dir / f"paddle_{name}.png"
+                prepared.save(target)
+                variants.append((name, target))
+    except OSError as exc:
+        logger.warning("Could not build Paddle preprocessing variants, using raw image: %s", exc)
+    return variants
+
+
+def _field_completeness(draft) -> float:
+    """Fraction of the key fields the parser managed to fill (0.0 - 1.0)."""
+    checks = (
+        bool(draft.kwota),
+        bool(draft.data_dokumentu),
+        bool(draft.nip or draft.sprzedawca),
+        bool(draft.nr_fv or draft.nr_paragonu),
+    )
+    return sum(checks) / len(checks)
+
+
+def _select_best_paddle_result(candidates: list[OcrResult]) -> OcrResult:
+    """Pick the variant whose text both reads confidently and parses into key fields."""
+    from .models import ReceiptDraft
+    from .parser import parse_receipt_text
+
+    best: OcrResult | None = None
+    best_key: tuple[float, int] = (float("-inf"), -1)
+    for candidate in candidates:
+        if not candidate.text.strip():
+            continue
+        draft = parse_receipt_text(candidate.text, ReceiptDraft.empty("select", 0, ""))
+        completeness = _field_completeness(draft)
+        # Equal weight on confidence and completeness; longer text breaks ties.
+        key = (candidate.confidence + completeness, len(candidate.text))
+        if key > best_key:
+            best_key = key
+            best = candidate
+    # candidates is non-empty and all entries have text, so best is set.
+    assert best is not None
+    return best
 
 
 _PADDLE_OCR = None
@@ -90,32 +188,43 @@ def _get_paddle_ocr(settings: Settings):
 
     from paddleocr import PaddleOCR
 
-    model_dir = settings.data_dir / "paddleocr_models"
-    det_model_dir = model_dir / "det"
-    rec_model_dir = model_dir / "rec"
-    cls_model_dir = model_dir / "cls"
-    model_dir.mkdir(parents=True, exist_ok=True)
-
+    # Prefer the Latin recognition model (covers Polish diacritics); fall back to the
+    # English model if this PaddleOCR build does not ship/accept lang="latin".
     try:
-        _PADDLE_OCR = PaddleOCR(
-            lang="en",
+        _PADDLE_OCR = _build_paddle_ocr(PaddleOCR, "latin", _paddle_model_dirs(settings, "latin"))
+    except Exception as exc:  # noqa: BLE001 - any failure here means "lang unsupported"
+        logger.warning('PaddleOCR lang="latin" unavailable (%s); falling back to "en".', exc)
+        _PADDLE_OCR = _build_paddle_ocr(PaddleOCR, "en", _paddle_model_dirs(settings, "en"))
+    return _PADDLE_OCR
+
+
+def _paddle_model_dirs(settings: Settings, lang: str) -> dict[str, str]:
+    model_dir = settings.data_dir / "paddleocr_models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "det_model_dir": str(model_dir / "det"),
+        "rec_model_dir": str(model_dir / f"rec_{lang}"),
+        "cls_model_dir": str(model_dir / "cls"),
+    }
+
+
+def _build_paddle_ocr(paddle_cls, lang: str, dirs: dict[str, str]):
+    """Construct a PaddleOCR instance, tolerating the 2.x vs 3.x constructor differences."""
+    try:
+        return paddle_cls(
+            lang=lang,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=True,
-            det_model_dir=str(det_model_dir),
-            rec_model_dir=str(rec_model_dir),
-            cls_model_dir=str(cls_model_dir),
+            **dirs,
         )
     except ValueError:
-        _PADDLE_OCR = PaddleOCR(
-            lang="en",
+        return paddle_cls(
+            lang=lang,
             use_angle_cls=True,
             show_log=False,
-            det_model_dir=str(det_model_dir),
-            rec_model_dir=str(rec_model_dir),
-            cls_model_dir=str(cls_model_dir),
+            **dirs,
         )
-    return _PADDLE_OCR
 
 
 def _run_paddle_ocr(ocr, image_path: Path):
@@ -125,17 +234,42 @@ def _run_paddle_ocr(ocr, image_path: Path):
 
 
 def _extract_paddle_text_lines(result) -> list[str]:
+    return _extract_paddle_text_and_scores(result)[0]
+
+
+def _extract_paddle_text_and_scores(result) -> tuple[list[str], list[float]]:
+    """Extract recognised lines and their confidence scores from a PaddleOCR result.
+
+    Handles both the 3.x dict form ({"rec_texts": [...], "rec_scores": [...]}) and the
+    legacy nested-list form ([(bbox, (text, score)), ...]). Lines without a usable score
+    simply contribute no score; confidence is averaged over whatever scores are present.
+    """
     lines: list[str] = []
+    scores: list[float] = []
+
+    def add_score(raw) -> None:
+        try:
+            scores.append(float(raw))
+        except (TypeError, ValueError):
+            pass
 
     def visit(value) -> None:
         if value is None:
             return
         if isinstance(value, dict):
-            for key in ("rec_texts", "texts"):
-                text_values = value.get(key)
-                if isinstance(text_values, list):
-                    lines.extend(str(item).strip() for item in text_values if str(item).strip())
-                    return
+            texts = value.get("rec_texts")
+            if not isinstance(texts, list):
+                texts = value.get("texts")
+            if isinstance(texts, list):
+                raw_scores = value.get("rec_scores")
+                for index, item in enumerate(texts):
+                    text = str(item).strip()
+                    if not text:
+                        continue
+                    lines.append(text)
+                    if isinstance(raw_scores, list) and index < len(raw_scores):
+                        add_score(raw_scores[index])
+                return
             for item in value.values():
                 visit(item)
             return
@@ -143,13 +277,15 @@ def _extract_paddle_text_lines(result) -> list[str]:
             text = str(value[1][0]).strip()
             if text:
                 lines.append(text)
+                if len(value[1]) >= 2:
+                    add_score(value[1][1])
             return
         if isinstance(value, list):
             for item in value:
                 visit(item)
 
     visit(result)
-    return lines
+    return lines, scores
 
 
 def _extract_text_with_tesseract(image_path: Path, settings: Settings) -> str:
