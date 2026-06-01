@@ -1,0 +1,7 @@
+python-telegram-bot==21.11.1
+python-dotenv==1.0.1
+Pillow==10.4.0
+numpy==1.26.4
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+pytest==8.3.3

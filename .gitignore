@@ -1,0 +1,19 @@
+.env
+.venv/
+.venv*/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+data/
+logs/
+*.zip
+*.log
+
+# Agent tooling skills tree (not part of the bot)
+.agents/
+
