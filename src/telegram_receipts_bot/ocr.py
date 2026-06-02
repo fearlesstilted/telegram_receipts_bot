@@ -106,14 +106,12 @@ def _prepare_paddle_variants(image_path: Path, temp_dir: Path) -> list[tuple[str
     """
     variants: list[tuple[str, Path]] = [("raw", image_path)]
     try:
-        with Image.open(image_path) as image:
-            gray = _upscale_if_needed(ImageOps.grayscale(image))
-            gray = ImageOps.autocontrast(gray)
-            sharp = ImageEnhance.Sharpness(ImageEnhance.Contrast(gray).enhance(1.5)).enhance(1.6)
-            for name, prepared in (("gray", gray), ("sharp", sharp)):
-                target = temp_dir / f"paddle_{name}.png"
-                prepared.save(target)
-                variants.append((name, target))
+        base = _prepare_base_image(image_path)
+        sharp = ImageEnhance.Sharpness(ImageEnhance.Contrast(base).enhance(1.5)).enhance(1.6)
+        for name, prepared in (("gray", base), ("sharp", sharp)):
+            target = temp_dir / f"paddle_{name}.png"
+            prepared.save(target)
+            variants.append((name, target))
     except OSError as exc:
         logger.warning("Could not build Paddle preprocessing variants, using raw image: %s", exc)
     return variants
@@ -132,6 +130,7 @@ def _field_completeness(draft) -> float:
 
 def _select_best_paddle_result(candidates: list[OcrResult]) -> OcrResult:
     """Pick the variant whose text both reads confidently and parses into key fields."""
+    # Deferred imports to break circular dependency: ocr → parser → models → ocr.
     from .models import ReceiptDraft
     from .parser import parse_receipt_text
 
@@ -306,41 +305,59 @@ def _extract_text_with_tesseract(image_path: Path, settings: Settings) -> str:
 
 def _prepare_image_variants(image_path: Path, temp_dir: Path) -> list[Path]:
     try:
-        with Image.open(image_path) as image:
-            base = _upscale_if_needed(ImageOps.grayscale(image))
-            base = ImageOps.autocontrast(base)
-
-            variants = [
-                ("gray", base),
-                ("contrast", ImageEnhance.Contrast(base).enhance(1.9)),
-                (
-                    "sharp",
-                    ImageEnhance.Sharpness(ImageEnhance.Contrast(base).enhance(1.7)).enhance(1.8),
-                ),
-                (
-                    "threshold",
-                    ImageEnhance.Contrast(base).enhance(1.6).point(lambda pixel: 255 if pixel > 165 else 0),
-                ),
-                (
-                    "denoise",
-                    ImageEnhance.Contrast(base.filter(ImageFilter.MedianFilter(size=3))).enhance(1.8),
-                ),
-            ]
-
-            paths = []
-            for name, variant in variants:
-                target = temp_dir / f"receipt_{name}.png"
-                variant.save(target)
-                paths.append(target)
-            return paths
+        base = _prepare_base_image(image_path)
+        contrast = ImageEnhance.Contrast(base).enhance(1.5)
+        variants = [
+            ("gray", base),
+            ("contrast", contrast),
+            ("sharp", ImageEnhance.Sharpness(contrast).enhance(1.8)),
+            ("threshold", _otsu_threshold(contrast)),
+            ("denoise", ImageEnhance.Contrast(base).enhance(1.5).filter(ImageFilter.MedianFilter(size=3))),
+        ]
+        paths = []
+        for name, variant in variants:
+            target = temp_dir / f"receipt_{name}.png"
+            variant.save(target)
+            paths.append(target)
+        return paths
     except OSError as exc:
         raise OcrError(f"Cannot prepare image for OCR: {exc}") from exc
 
 
+def _prepare_base_image(image_path: Path) -> Image.Image:
+    """Shared first step: open, grayscale, upscale, autocontrast."""
+    with Image.open(image_path) as img:
+        gray = ImageOps.grayscale(img)
+    return ImageOps.autocontrast(_upscale_if_needed(gray))
+
+
+def _otsu_threshold(image: Image.Image) -> Image.Image:
+    """Adaptive binarization using Otsu's method (pure PIL, no extra deps)."""
+    hist = image.histogram()
+    total = sum(hist)
+    sum_all = sum(i * hist[i] for i in range(256))
+    best_t, best_var = 0, 0.0
+    w0 = sum0 = 0
+    for t in range(256):
+        w0 += hist[t]
+        if w0 == 0:
+            continue
+        w1 = total - w0
+        if w1 == 0:
+            break
+        sum0 += t * hist[t]
+        m0, m1 = sum0 / w0, (sum_all - sum0) / w1
+        var = w0 * w1 * (m0 - m1) ** 2
+        if var > best_var:
+            best_var, best_t = var, t
+    return image.point(lambda p: 255 if p > best_t else 0)
+
+
 def _upscale_if_needed(image: Image.Image) -> Image.Image:
-    if image.width >= 1600:
+    short = min(image.width, image.height)
+    if short >= 1000:
         return image
-    ratio = 1600 / image.width
+    ratio = 1000 / short
     return image.resize(
         (int(image.width * ratio), int(image.height * ratio)),
         Image.Resampling.LANCZOS,
@@ -362,6 +379,10 @@ def _best_tesseract_text(image_paths: list[Path], settings: Settings) -> str:
                     "pol+eng",
                     "--psm",
                     psm,
+                    "--oem",
+                    "1",
+                    "--dpi",
+                    "300",
                 ],
                 capture_output=True,
                 text=True,

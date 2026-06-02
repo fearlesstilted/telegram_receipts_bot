@@ -15,7 +15,7 @@ DATE_PATTERNS = [
     re.compile(r"\b(\d{2})[./-](\d{2})\s+(\d{2})\b"),
 ]
 NIP_RE = re.compile(r"\bN\s*[I1L]?\s*P[:\s]*([0-9][0-9 -]{8,16}[0-9])\b", re.IGNORECASE)
-MONEY_RE = re.compile(r"(?<![A-Za-z0-9])(-?\d{1,7}[.,]\d{2}|[IILl]\d{1,6}[.,]\d{2})(?!\d)")
+MONEY_RE = re.compile(r"(?<![A-Za-z0-9])(-?\d{1,7}[.,]\d{2}|[IL]{1,2}\d{1,6}[.,]\d{2})(?!\d)")
 INVOICE_RE = re.compile(
     r"\b(?:nr\s*f[av]?|faktura|paragon)\b[:\s#/-]*([A-Z0-9/_-]{3,})",
     re.IGNORECASE,
@@ -236,11 +236,15 @@ def _has_nip_marker(line: str) -> bool:
     return bool(re.search(r"\bN\s*[I1L]?\s*P", line, re.IGNORECASE))
 
 
+_NIP_WEIGHTS = (6, 5, 7, 2, 3, 4, 5, 6, 7)
+
+
 def _looks_like_nip_digits(digits: str) -> bool:
     if len(digits) < 10:
         return False
-    value = digits[:10]
-    return not re.match(r"20\d{8}", value)
+    d = [int(c) for c in digits[:10]]
+    checksum = sum(w * v for w, v in zip(_NIP_WEIGHTS, d)) % 11
+    return checksum == d[9]
 
 
 def _nip_score(lines: list[str], index: int, line: str) -> int:
@@ -260,19 +264,20 @@ def _nip_score(lines: list[str], index: int, line: str) -> int:
 
 
 def _normalize_known_vendor_nip(lines: list[str], nip: str) -> str:
+    # Apply corrections for recurring vendors whose NIP is frequently OCR-corrupted.
+    # Triggered even when nip is empty if the vendor name is unambiguous.
     haystack = " ".join(lines[:12]).lower()
-    if "action" in haystack and nip.startswith("954277"):
+    if "action" in haystack and (not nip or nip.startswith("954277")):
         return "9542778083"
-    if (
-        nip.startswith("747")
-        and ("gastronomic" in haystack or "firek" in haystack or "mario" in haystack)
+    if ("gastronomic" in haystack or "firek" in haystack or "mario" in haystack) and (
+        not nip or nip.startswith("747")
     ):
         return "7471727805"
     return nip
 
 
 def _extract_invoice_number(lines: list[str]) -> str:
-    for line in lines[:25]:
+    for index, line in enumerate(lines[:25]):
         invoice_match = re.search(
             r"\b(?:faktura\s*(?:vat)?|faktura\s*nr|potwierdzenie\s+sprzedaży|potwierdzenie\s+sprzedazy)"
             r"[:\s#/-]*([A-Z0-9][A-Z0-9/_-]{2,})",
@@ -290,7 +295,7 @@ def _extract_invoice_number(lines: list[str]) -> str:
             fallback = re.search(r"\b(\d{2,}/\d{2,}/\d{2,}(?:/\d{4})?)\b", line)
             if fallback:
                 return fallback.group(1)
-            next_value = _extract_document_number_from_following_lines(lines, lines.index(line))
+            next_value = _extract_document_number_from_following_lines(lines, index)
             if next_value:
                 return next_value
         match = INVOICE_RE.search(line)
@@ -684,7 +689,7 @@ def _build_towar(items: list[ReceiptItem]) -> str:
 
 def _safe_money(raw_value: str) -> float | None:
     cleaned = raw_value.replace(" ", "").replace(",", ".")
-    cleaned = re.sub(r"^[IILl](?=\d)", "1", cleaned)
+    cleaned = re.sub(r"^[IL]{1,2}(?=\d)", "1", cleaned)
     try:
         return round(float(cleaned), 2)
     except ValueError:
