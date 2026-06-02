@@ -264,3 +264,114 @@ def test_parse_action_receipt_ignores_bdo_as_document_number() -> None:
     assert parsed.nr_paragonu == "A53410190003114"
     assert parsed.nr_paragonu != "B000066044"
     assert parsed.sprzedawca == "Action Poland Sp. z o.o."
+
+
+def test_parse_lewiatan_ocr_noise_extracts_nip_date_and_total() -> None:
+    raw_text = """
+    LEWIATAN
+    Ftrma Handtowo-Ustugowa "AMI"
+    ul. warnenczyka 3
+    87-860 cnodecz
+    NP8881008080
+    PARAGON FISKALNY
+    Sprzeda2 opodat kowana A:
+    122.33
+    SUMA :
+    PlN i22.33
+    DO ZAPEATY:
+    122.33
+    Gotowka:
+    225.00
+    NIP nabywcy
+    8471616678
+    29-05202608:23
+    """
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/lewiatan.jpg")
+    parsed = parse_receipt_text(raw_text, draft)
+
+    assert parsed.nip == "8881008080"
+    assert parsed.data_dokumentu == "2026-05-29"
+    assert parsed.kwota == 122.33
+
+
+def test_parse_netto_ocr_noise_skips_invalid_dates_and_cash_amount() -> None:
+    raw_text = """
+    Netto Indygo Sp. z 0.0
+    Motaniec 30,73-108Kobylanka
+    Sklep nr 4666
+    19-500 Goldap.Ul.Wolnosci 2
+    N1P526-10-37-737
+    2026-05-27Sr
+    PARAGON FISKALNY
+    Suma PLN
+    16:28
+    HPLATA GOTOWKA
+    600.00
+    Do zaptaty:
+    463.63
+    136.37
+    Reszta.PLN
+    4666/26/05/27/1/554
+    NUMER SYSTEMOWY
+    """
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/netto.jpg")
+    parsed = parse_receipt_text(raw_text, draft)
+
+    assert parsed.sprzedawca == "Netto Indygo Sp. z 0.0"
+    assert parsed.nip == "5261037737"
+    assert parsed.data_dokumentu == "2026-05-27"
+    assert parsed.kwota == 463.63
+
+
+def test_parse_a4_invoice_ignores_long_product_codes_as_money() -> None:
+    raw_text = """
+    FAKTURA
+    Numer5919/F/833/26
+    Data wystawienia27-05-202621:46
+    Data sprzedazy:27-05-2026
+    Sprzedawca:
+    MOLPolska sp.Z0.0
+    NIP:583-10-23182
+    Nabywca:
+    TK SPOKA Z OGRANICZONA ODPOWEDZIALNOSCIA
+    NIP:8471628972
+    Wart.Brutto
+    BEVDselCN2102011.2710194401.00001t6.56
+    BEVODs10211.2710194401470001r6.57
+    Wart.Brutto
+    8%
+    284.08
+    22.73
+    306.81
+    SUMA:
+    PLN306.81
+    27-05-202621:46
+    """
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/mol.jpg")
+    parsed = parse_receipt_text(raw_text, draft)
+
+    assert parsed.kwota == 306.81
+    assert parsed.kwota < 1_000_000
+
+
+def test_parse_bar_receipt_does_not_choose_plac_address_as_seller() -> None:
+    raw_text = """
+    BAR U HUBERTA
+    HUBERT JANKOWSK!
+    PLAC WOLNOSC1 24 24
+    LUBIEN KUJAWSKI
+    87-840 LUB1EN KUJAWSKI
+    NIP: 8883005335
+    PARAGON FISKALNY
+    1x795.00
+    795.00 B
+    SUMA:
+    795.00
+    30-05-2026 12:30
+    """
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/bar.jpg")
+    parsed = parse_receipt_text(raw_text, draft)
+
+    assert parsed.sprzedawca == "BAR U HUBERTA"
+    assert parsed.nip == "8883005335"
+    assert parsed.data_dokumentu == "2026-05-30"

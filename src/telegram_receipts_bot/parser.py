@@ -6,15 +6,16 @@ from datetime import datetime
 from .models import ReceiptDraft, ReceiptItem
 
 DATE_PATTERNS = [
-    re.compile(r"\b(\d{4})[./-](\d{2})[./-](\d{2})\b"),
+    re.compile(r"\b(\d{4})[./-](\d{2})[./-](\d{2})(?!\d)"),
     re.compile(r"\b(\d{2})[./-](\d{2})[./-](\d{4})(?=\d{2}:\d{2}\b)"),
+    re.compile(r"\b(\d{2})[./-](\d{2})(\d{4})(?=\d{2}:\d{2}\b)"),
     re.compile(r"\b(\d{2})[./-](\d{2})[./-](\d{4})\b"),
     re.compile(r"\b(\d{2})[./-](\d{2})[./-](\d{2})\b"),
     re.compile(r"\b(\d{2})[./-](\d{2})\s+(\d{4})\b"),
     re.compile(r"\b(\d{2})[./-](\d{2})\s+(\d{2})\b"),
 ]
-NIP_RE = re.compile(r"\bNIP[:\s]*([0-9][0-9 -]{8,16}[0-9])\b", re.IGNORECASE)
-MONEY_RE = re.compile(r"(-?\d+[.,]\d{2})")
+NIP_RE = re.compile(r"\bN\s*[I1L]?\s*P[:\s]*([0-9][0-9 -]{8,16}[0-9])\b", re.IGNORECASE)
+MONEY_RE = re.compile(r"(?<![A-Za-z0-9])(-?\d{1,7}[.,]\d{2}|[IILl]\d{1,6}[.,]\d{2})(?!\d)")
 INVOICE_RE = re.compile(
     r"\b(?:nr\s*f[av]?|faktura|paragon)\b[:\s#/-]*([A-Z0-9/_-]{3,})",
     re.IGNORECASE,
@@ -26,6 +27,10 @@ TOTAL_HINTS = (
     "do zapłaty",
     "razem do zaplaty",
     "razem do zapłaty",
+    "razem do zaptaty",
+    "do zaptaty",
+    "do zapeaty",
+    "razem do zapeaty",
     "wartosc brutto",
     "wartość brutto",
     "sprzedaz opod",
@@ -142,12 +147,9 @@ def _extract_date(lines: list[str]) -> str:
             match = pattern.search(line)
             if not match:
                 continue
-            parts = match.groups()
-            if len(parts[0]) == 4:
-                return f"{parts[0]}-{parts[1]}-{parts[2]}"
-            if len(parts[2]) == 2:
-                return f"20{parts[2]}-{parts[1]}-{parts[0]}"
-            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+            value = _date_from_match(match)
+            if value:
+                return value
     return ""
 
 
@@ -160,20 +162,34 @@ def _extract_date_near_label(lines: list[str], label: str) -> str:
                 match = pattern.search(candidate)
                 if not match:
                     continue
-                parts = match.groups()
-                if len(parts[0]) == 4:
-                    return f"{parts[0]}-{parts[1]}-{parts[2]}"
-                if len(parts[2]) == 2:
-                    return f"20{parts[2]}-{parts[1]}-{parts[0]}"
-                return f"{parts[2]}-{parts[1]}-{parts[0]}"
+                value = _date_from_match(match)
+                if value:
+                    return value
     return ""
+
+
+def _date_from_match(match: re.Match[str]) -> str:
+    parts = match.groups()
+    if len(parts[0]) == 4:
+        year, month, day = parts[0], parts[1], parts[2]
+    elif len(parts[2]) == 2:
+        year, month, day = f"20{parts[2]}", parts[1], parts[0]
+    else:
+        year, month, day = parts[2], parts[1], parts[0]
+
+    value = f"{year}-{month}-{day}"
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return value
 
 
 def _extract_nip(lines: list[str]) -> str:
     candidates: list[tuple[int, str]] = []
     for index, line in enumerate(lines[:80]):
         lower = line.lower()
-        if "nip" not in lower:
+        if not _has_nip_marker(line):
             if "regon" in lower:
                 digits = re.sub(r"\D", "", line)
                 if _looks_like_nip_digits(digits):
@@ -187,7 +203,7 @@ def _extract_nip(lines: list[str]) -> str:
                 candidates.append((_nip_score(lines, index, line), digits))
             continue
 
-        if re.search(r"\bnip[:\s]*$", line, re.IGNORECASE):
+        if re.search(r"\bN\s*[I1L]?\s*P[:\s]*$", line, re.IGNORECASE):
             for candidate in lines[index + 1 : index + 3]:
                 digits = re.sub(r"\D", "", candidate)
                 if _looks_like_nip_digits(digits):
@@ -203,7 +219,7 @@ def _extract_a4_seller_nip(lines: list[str]) -> str:
     buyer_index = _first_line_index(lines, ("nabywca",))
     search_lines = lines[: buyer_index if buyer_index is not None else min(len(lines), 30)]
     for line in search_lines:
-        if "nip" not in line.lower():
+        if not _has_nip_marker(line):
             continue
         match = NIP_RE.search(line)
         if match:
@@ -214,6 +230,10 @@ def _extract_a4_seller_nip(lines: list[str]) -> str:
         if _looks_like_nip_digits(digits):
             return digits[:10]
     return ""
+
+
+def _has_nip_marker(line: str) -> bool:
+    return bool(re.search(r"\bN\s*[I1L]?\s*P", line, re.IGNORECASE))
 
 
 def _looks_like_nip_digits(digits: str) -> bool:
@@ -350,10 +370,14 @@ def _extract_total(lines: list[str]) -> float | None:
     prioritized = (
         "razem do zaplaty",
         "razem do zapłaty",
+        "razem do zaptaty",
+        "razem do zapeaty",
         "suma pln",
         "suma:",
         "do zaplaty",
         "do zapłaty",
+        "do zaptaty",
+        "do zapeaty",
         "wartosc brutto",
         "wartość brutto",
         "brutto",
@@ -517,6 +541,7 @@ def _looks_like_seller_candidate(line: str) -> bool:
         "elektryczna",
         "graniczna",
         "goldap",
+        "plac",
         "ul.",
         "krakow",
         "kraków",
@@ -532,7 +557,7 @@ def _looks_like_seller_candidate(line: str) -> bool:
         return False
     if len(line) < 8 and "sp" not in lower:
         return False
-    if re.search(r"\b\d{2}-\d{3}\b", line) or _looks_like_street_line(line):
+    if re.search(r"\d{2}-\d{3}", line) or _looks_like_street_line(line):
         return False
     if lower.startswith(("ul.", "u1.", "al.")):
         return False
@@ -555,6 +580,9 @@ def _seller_score(line: str, index: int) -> int:
         "lidl",
         "orlen",
         "shell",
+        "bar",
+        "sp. z",
+        "sp.z",
     )
     score += sum(25 for word in business_words if word in lower)
     score += min(len(line), 60)
@@ -656,6 +684,7 @@ def _build_towar(items: list[ReceiptItem]) -> str:
 
 def _safe_money(raw_value: str) -> float | None:
     cleaned = raw_value.replace(" ", "").replace(",", ".")
+    cleaned = re.sub(r"^[IILl](?=\d)", "1", cleaned)
     try:
         return round(float(cleaned), 2)
     except ValueError:
