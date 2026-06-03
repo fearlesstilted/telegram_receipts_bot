@@ -109,7 +109,9 @@ def test_select_best_uses_confidence_as_tiebreaker_when_completeness_equal() -> 
     assert best.variant == "sharp"
 
 
-def test_paddle_model_dirs_keep_language_recognition_models_separate(tmp_path) -> None:
+def test_paddle_model_dirs_returns_empty_dict(tmp_path) -> None:
+    # PaddleOCR now manages its own model cache to avoid inference.yml
+    # compatibility issues between 2.x and 3.x model formats.
     settings = Settings(
         telegram_bot_token="",
         telegram_allowed_chat_id=None,
@@ -122,10 +124,5 @@ def test_paddle_model_dirs_keep_language_recognition_models_separate(tmp_path) -
         timezone_name="Europe/Warsaw",
     )
 
-    latin = _paddle_model_dirs(settings, "latin")
-    english = _paddle_model_dirs(settings, "en")
-
-    assert latin["det_model_dir"] == english["det_model_dir"]
-    assert latin["cls_model_dir"] == english["cls_model_dir"]
-    assert latin["rec_model_dir"].endswith("rec_latin")
-    assert english["rec_model_dir"].endswith("rec_en")
+    assert _paddle_model_dirs(settings, "latin") == {}
+    assert _paddle_model_dirs(settings, "en") == {}

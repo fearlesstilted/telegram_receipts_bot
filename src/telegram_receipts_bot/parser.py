@@ -49,14 +49,6 @@ ROLLED_INVOICE_HINTS = (
     "data wystawienia faktury",
     "nip nabywcy",
 )
-FISCAL_RECEIPT_HINTS = (
-    "paragon fiskalny",
-    "suma pln",
-    "do zaplaty",
-    "do zapłaty",
-)
-
-
 def parse_receipt_text(raw_text: str, draft: ReceiptDraft) -> ReceiptDraft:
     lines = _normalized_lines(raw_text)
     draft.ocr_text = "\n".join(lines)
@@ -337,19 +329,13 @@ def _extract_receipt_number(lines: list[str]) -> str:
                 if match:
                     return match.group(1)
 
-    for line in reversed(lines):
-        lower = line.lower()
-        if "nip nabywcy" in lower or "nabywcy" in lower:
-            continue
-        match = re.search(r"\b([A-F0-9]{16,})\b", line, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
     return ""
 
 
 def _extract_order_or_register_number(lines: list[str]) -> str:
     preferred_patterns = (
         re.compile(r"\bF\d{3,}/\d{2}\s*#?\s*[A-Z0-9]{4,}\b", re.IGNORECASE),
+        re.compile(r"\bF\d{3,}/\d{2}", re.IGNORECASE),
     )
     for line in lines:
         for pattern in preferred_patterns:
@@ -601,10 +587,10 @@ def _seller_score(line: str, index: int) -> int:
 def _extract_address(lines: list[str], seller: str) -> str:
     seller_index = 0
     if seller:
-        try:
-            seller_index = lines.index(seller)
-        except ValueError:
-            seller_index = 0
+        for index, line in enumerate(lines):
+            if line == seller:
+                seller_index = index
+                break
 
     address_lines = []
     for line in lines[seller_index + 1 : seller_index + 8]:
@@ -675,6 +661,8 @@ def _extract_items(lines: list[str]) -> list[ReceiptItem]:
         if name.lower() in {"pln", "eur", "usd"}:
             continue
         if re.search(r"\d{2}[./-]\d{2}[./-]\d{4}", name):
+            continue
+        if re.match(r"^\d+%$", name.strip()):
             continue
         items.append(ReceiptItem(name=name[:120], price=price))
         if len(items) >= 12:

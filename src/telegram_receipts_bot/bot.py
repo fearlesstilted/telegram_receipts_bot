@@ -74,7 +74,7 @@ class ReceiptBot:
         if not self._is_allowed(update):
             return
         await update.message.reply_text(
-            "Wyślij zdjęcie paragonu albo faktury.\n"
+            "Wyślij paragon albo fakturę. Najlepiej jako plik/dokument, bo zwykłe zdjęcie w Telegramie traci jakość.\n"
             "Bot odczyta dane, pokaże krótki podgląd i dopisze dokument do jednej tabeli Excel dopiero po kliknięciu Zapisz.",
             reply_markup=_main_keyboard(),
         )
@@ -83,7 +83,7 @@ class ReceiptBot:
         if not self._is_allowed(update):
             return
         await update.message.reply_text(
-            "1. Wyślij zdjęcie paragonu albo faktury.\n"
+            "1. Wyślij paragon albo fakturę, najlepiej jako plik/dokument.\n"
             "2. Sprawdź: data, kwota, sprzedawca, NIP.\n"
             "3. Kliknij Zapisz albo Edytuj.\n\n"
             "Przyciski:\n"
@@ -176,7 +176,7 @@ class ReceiptBot:
             return
         if text == BTN_ADD:
             await update.message.reply_text(
-                "Wyślij tutaj zdjęcie paragonu albo faktury. Możesz wysłać kilka zdjęć po kolei.",
+                "Wyślij tutaj paragon albo fakturę. Najlepiej jako plik/dokument; możesz wysłać kilka po kolei.",
                 reply_markup=_main_keyboard(),
             )
             return
@@ -195,7 +195,7 @@ class ReceiptBot:
 
         draft_id = self.edit_sessions.get(chat_id)
         if not draft_id:
-            await update.message.reply_text("Wyślij zdjęcie paragonu albo użyj przycisku Edytuj.")
+            await update.message.reply_text("Wyślij paragon/fakturę albo użyj przycisku Edytuj.")
             return
         draft = self.state.get_draft(draft_id)
         if not draft:
@@ -225,7 +225,7 @@ class ReceiptBot:
         if isinstance(update, Update) and update.effective_message:
             try:
                 await update.effective_message.reply_text(
-                    "Coś poszło nie tak podczas przetwarzania. Wyślij zdjęcie jeszcze raz."
+                    "Coś poszło nie tak podczas przetwarzania. Wyślij dokument jeszcze raz."
                 )
             except TelegramError:
                 logger.exception("Failed to notify user about update error")
@@ -236,7 +236,7 @@ class ReceiptBot:
         except (TimedOut, NetworkError) as exc:
             logger.warning("Telegram file download request timed out: %s", exc)
             await update.message.reply_text(
-                "Nie udało się pobrać zdjęcia z Telegrama. Wyślij je jeszcze raz albo jako mniejsze zdjęcie."
+                "Nie udało się pobrać pliku z Telegrama. Wyślij go jeszcze raz, najlepiej jako dokument."
             )
             return None
 

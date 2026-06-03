@@ -266,6 +266,26 @@ def test_parse_action_receipt_ignores_bdo_as_document_number() -> None:
     assert parsed.sprzedawca == "Action Poland Sp. z o.o."
 
 
+def test_parse_receipt_prefers_register_number_over_long_fiscal_hash() -> None:
+    raw_text = """
+    LEWIATAN
+    NP8881008080
+    PARAGON FISKALNY
+    SUMA:
+    PLN 122.33
+    F0345/6628-An
+    NIP nabywcy
+    8471616678
+    29-05202608:23
+    SA6C0A0106462AC1381500A3577312168800330
+    """
+    draft = ReceiptDraft.empty("abc", 1, "/tmp/lewiatan.jpg")
+    parsed = parse_receipt_text(raw_text, draft)
+
+    assert parsed.nr_paragonu == "F0345/66"
+    assert parsed.nr_paragonu != "SA6C0A0106462AC1381500A3577312168800330"
+
+
 def test_parse_lewiatan_ocr_noise_extracts_nip_date_and_total() -> None:
     raw_text = """
     LEWIATAN

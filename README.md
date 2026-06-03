@@ -6,12 +6,15 @@ records to an Excel file.
 The bot is designed for a simple monthly workflow:
 
 1. Run the bot on a Windows laptop.
-2. Send receipt photos to the bot in Telegram.
+2. Send receipt/invoice images to the bot in Telegram.
 3. Review the extracted fields.
 4. Click `Zapisz` to save, or `Edytuj` to correct the data first.
 5. Download the updated Excel file from Telegram.
 
 Nothing is saved automatically. Every receipt requires explicit confirmation.
+
+For best OCR quality, send receipts as a Telegram file/document when possible.
+Regular Telegram photos are compressed and can lose small receipt text.
 
 ## Windows Setup
 
@@ -36,6 +39,9 @@ TELEGRAM_ALLOWED_CHAT_ID=your-numeric-chat-id-here
 OCR_MODE=paddle
 ```
 
+`RUN_WINDOWS.bat` creates a local `.venv` with Python 3.11 and installs the pinned
+PaddleOCR 2.7.x dependencies from `requirements.txt`.
+
 If startup fails, run:
 
 ```bat
@@ -57,6 +63,7 @@ Runtime data is local and ignored by git:
 - `data/`
 - `logs/`
 - `.venv/`
+- `.venv311/`
 
 ## Telegram Commands
 
@@ -70,15 +77,19 @@ Runtime data is local and ignored by git:
 ## Development
 
 ```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
-PYTHONPATH=src .venv/bin/python -m pytest
+python3.11 -m venv .venv311
+.venv311/bin/python -m pip install --upgrade pip
+.venv311/bin/python -m pip install -r requirements.txt
+PYTHONPATH=src .venv311/bin/python -m pytest
 ```
+
+Use Python 3.11 for development. Do not reuse an existing Python 3.13 `.venv`
+for OCR work: the pinned PaddleOCR/Paddle stack is tested against Python 3.11.
 
 Optional local OCR/parser evaluation:
 
 ```bash
-PYTHONPATH=src .venv/bin/python tools/eval_ocr.py --init
-PYTHONPATH=src .venv/bin/python tools/eval_ocr.py
+PYTHONPATH=src .venv311/bin/python tools/eval_ocr.py --init
+PYTHONPATH=src .venv311/bin/python tools/eval_ocr.py
+PYTHONPATH=src .venv311/bin/python tools/inspect_receipts.py data/receipts/*.jpg --no-raw
 ```

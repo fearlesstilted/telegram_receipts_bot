@@ -74,7 +74,7 @@ def _extract_paddle_ocr_result(image_path: Path, settings: Settings) -> OcrResul
     except ImportError as exc:
         raise OcrError(
             "PaddleOCR is not installed. Install local dependencies with "
-            "`.venv/bin/python3 -m pip install -r requirements.txt`."
+            "`python -m pip install -r requirements.txt` or run `RUN_WINDOWS.bat` on Windows."
         ) from exc
     except Exception as exc:
         raise OcrError(_describe_paddle_failure(exc)) from exc
@@ -198,29 +198,30 @@ def _get_paddle_ocr(settings: Settings):
 
 
 def _paddle_model_dirs(settings: Settings, lang: str) -> dict[str, str]:
-    model_dir = settings.data_dir / "paddleocr_models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "det_model_dir": str(model_dir / "det"),
-        "rec_model_dir": str(model_dir / f"rec_{lang}"),
-        "cls_model_dir": str(model_dir / "cls"),
-    }
+    # Let PaddleOCR 3.x manage its own model cache (~/.paddleocr/).
+    # Specifying custom dirs causes inference.yml-not-found errors when models
+    # were downloaded with an older PaddleOCR version (2.x format, no YAML).
+    return {}
 
 
 def _build_paddle_ocr(paddle_cls, lang: str, dirs: dict[str, str]):
-    """Construct a PaddleOCR instance, tolerating the 2.x vs 3.x constructor differences."""
+    """Construct a PaddleOCR instance, tolerating the 2.x vs 3.x constructor differences.
+
+    Orientation classifiers are disabled — receipt photos are taken flat and the cls model
+    requires an inference.yml that PaddleOCR 3.x does not ship alongside the .pdmodel files.
+    """
     try:
         return paddle_cls(
             lang=lang,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_textline_orientation=True,
+            use_textline_orientation=False,
             **dirs,
         )
-    except ValueError:
+    except (ValueError, TypeError):
         return paddle_cls(
             lang=lang,
-            use_angle_cls=True,
+            use_angle_cls=False,
             show_log=False,
             **dirs,
         )
@@ -229,7 +230,7 @@ def _build_paddle_ocr(paddle_cls, lang: str, dirs: dict[str, str]):
 def _run_paddle_ocr(ocr, image_path: Path):
     if hasattr(ocr, "predict"):
         return ocr.predict(str(image_path))
-    return ocr.ocr(str(image_path), cls=True)
+    return ocr.ocr(str(image_path), cls=False)
 
 
 def _extract_paddle_text_lines(result) -> list[str]:
