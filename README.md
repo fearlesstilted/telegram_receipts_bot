@@ -16,6 +16,21 @@ Nothing is saved automatically. Every receipt requires explicit confirmation.
 For best OCR quality, send receipts as a Telegram file/document when possible.
 Regular Telegram photos are compressed and can lose small receipt text.
 
+## Quality warnings
+
+The bot automatically checks each receipt before showing the save button:
+
+- **OCR confidence** — low confidence triggers a warning.
+- **Field completeness** — missing amount, date, or seller/NIP requires manual review before save.
+- **OCR text length** — very short OCR output suggests the image may be unreadable.
+- **Image quality** — too small, too dark, too bright, or low-contrast images are flagged.
+
+When issues are found the bot shows an *"Uwaga"* message and replaces the `Zapisz` button with `Zapisz mimo to`, which requires an explicit second click. Use `Edytuj` to fix any extracted fields before saving.
+
+If you send a photo instead of a document the bot will remind you:
+`Wskazówka: najlepsza jakość OCR jest po wysłaniu jako plik/dokument.`
+This hint appears only when everything else parsed correctly; it never blocks saving.
+
 ## Windows Setup
 
 Install Python 3.11 from python.org, then clone the repository:

@@ -20,6 +20,7 @@ from .exporter import generate_register
 from .models import ReceiptDraft
 from .ocr import OcrError, extract_ocr_result
 from .parser import apply_manual_edits, parse_receipt_text
+from .quality import ReceiptRiskAssessment, assess_receipt_risk
 from .sinks import BaseSink
 from .state import StateStore, current_month_key
 
@@ -156,7 +157,7 @@ class ReceiptBot:
         file_obj = await self._get_file_or_notify(update, photo)
         if file_obj is None:
             return
-        await self._process_file(update, file_obj.file_path, file_obj)
+        await self._process_file(update, file_obj.file_path, file_obj, source_kind="photo")
 
     async def on_document_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
@@ -164,7 +165,7 @@ class ReceiptBot:
         file_obj = await self._get_file_or_notify(update, update.message.document)
         if file_obj is None:
             return
-        await self._process_file(update, file_obj.file_path, file_obj)
+        await self._process_file(update, file_obj.file_path, file_obj, source_kind="document")
 
     async def on_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
@@ -314,7 +315,9 @@ class ReceiptBot:
 
         await query.message.reply_text("Nieznana akcja.")
 
-    async def _process_file(self, update: Update, file_name: str, file_obj) -> None:
+    async def _process_file(
+        self, update: Update, file_name: str, file_obj, source_kind: str = ""
+    ) -> None:
         chat_id = update.effective_chat.id
         draft_id = uuid.uuid4().hex[:10]
         suffix = Path(file_name or "receipt.jpg").suffix or ".jpg"
@@ -334,17 +337,21 @@ class ReceiptBot:
         self.state.save_draft(draft)
         month_key = current_month_key()
         remaining = self.state.preview_remaining(month_key, draft.kwota)
-        suspicious = _needs_manual_check(
-            draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
+        assessment = assess_receipt_risk(
+            draft,
+            source_kind=source_kind,
+            image_path=target,
+            confidence_warn=self.settings.ocr_confidence_warn,
+            max_auto_save_amount=self.settings.max_auto_save_amount,
         )
         text = draft.to_preview_text(remaining)
-        if suspicious:
-            text += "\n\n" + _manual_check_message(
-                draft, self.settings.max_auto_save_amount, self.settings.ocr_confidence_warn
-            )
+        if assessment.suspicious:
+            text += "\n\n" + _format_risk_message(assessment)
+        elif assessment.photo_hint:
+            text += "\n\n" + assessment.photo_hint
         await update.message.reply_text(
             text,
-            reply_markup=_preview_keyboard(draft.draft_id, suspicious),
+            reply_markup=_preview_keyboard(draft.draft_id, assessment.suspicious),
         )
 
     def _is_allowed(self, update: Update) -> bool:
@@ -427,53 +434,32 @@ def _parse_callback_data(data: str) -> tuple[str, str, str | None]:
     return action, draft_id, payload
 
 
-def _missing_critical_fields(draft: ReceiptDraft) -> bool:
-    """Warn if a field we really need is empty: amount, date, or any seller identity."""
-    if not draft.kwota:
-        return True
-    if not draft.data_dokumentu:
-        return True
-    if not draft.nip and not draft.sprzedawca:
-        return True
-    return False
-
-
-def _low_confidence(draft: ReceiptDraft, confidence_warn: float) -> bool:
-    """Low OCR confidence, but only when we actually have a confidence value (>0)."""
-    return bool(draft.ocr_confidence) and draft.ocr_confidence < confidence_warn
+def _format_risk_message(assessment: ReceiptRiskAssessment) -> str:
+    if not assessment.reasons:
+        return "Uwaga: sprawdź dane przed zapisem albo kliknij Edytuj."
+    return "Uwaga: " + "; ".join(assessment.reasons) + ". Sprawdź dane przed zapisem albo kliknij Edytuj."
 
 
 def _needs_manual_check(
     draft: ReceiptDraft, max_auto_save_amount: float, confidence_warn: float = 0.0
 ) -> bool:
-    if draft.kwota is None or draft.kwota <= 0 or draft.kwota > max_auto_save_amount:
-        return True
-    if _missing_critical_fields(draft):
-        return True
-    if _low_confidence(draft, confidence_warn):
-        return True
-    return False
+    image_path = Path(draft.source_path) if draft.source_path else None
+    return assess_receipt_risk(
+        draft,
+        image_path=image_path,
+        confidence_warn=confidence_warn,
+        max_auto_save_amount=max_auto_save_amount,
+    ).suspicious
 
 
 def _manual_check_message(
     draft: ReceiptDraft, max_auto_save_amount: float, confidence_warn: float = 0.0
 ) -> str:
-    reasons: list[str] = []
-    if draft.kwota is None:
-        reasons.append("nie udało się pewnie odczytać kwoty")
-    elif draft.kwota <= 0:
-        reasons.append("kwota wygląda nieprawidłowo")
-    elif draft.kwota > max_auto_save_amount:
-        reasons.append(
-            f"kwota {draft.kwota:.2f} PLN wygląda bardzo wysoko "
-            f"(limit bez ostrzeżenia: {max_auto_save_amount:.2f} PLN)"
-        )
-    if not draft.data_dokumentu:
-        reasons.append("brak daty dokumentu")
-    if not draft.nip and not draft.sprzedawca:
-        reasons.append("brak NIP i sprzedawcy")
-    if _low_confidence(draft, confidence_warn):
-        reasons.append(f"niska pewność odczytu OCR ({draft.ocr_confidence:.0%})")
-    if not reasons:
-        reasons.append("sprawdź dane przed zapisem")
-    return "Uwaga: " + "; ".join(reasons) + ". Sprawdź dane przed zapisem albo kliknij Edytuj."
+    image_path = Path(draft.source_path) if draft.source_path else None
+    assessment = assess_receipt_risk(
+        draft,
+        image_path=image_path,
+        confidence_warn=confidence_warn,
+        max_auto_save_amount=max_auto_save_amount,
+    )
+    return _format_risk_message(assessment)
