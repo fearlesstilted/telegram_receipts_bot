@@ -3,7 +3,7 @@
 A local Telegram bot for reading Polish receipts/invoices and appending confirmed
 records to an Excel file.
 
-The bot is designed for a simple monthly workflow:
+The bot is designed for a monthly bookkeeping workflow:
 
 1. Run the bot on a Windows laptop.
 2. Send receipt/invoice images to the bot in Telegram.
